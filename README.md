@@ -1,6 +1,6 @@
 # Stampede
 
-**Stampede** is a high-performance, developer-friendly Redis wrapper for Go, specifically designed to solve the **Thundering Herd (Cache Stampede)** problem and optimize **ID Projection** patterns in massive datasets.
+**Stampede** is a developer-friendly Redis wrapper for Go, specifically designed to solve the **Thundering Herd (Cache Stampede)** problem and optimize **ID Projection** patterns in massive datasets.
 
 ## Key Features
 

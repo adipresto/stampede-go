@@ -50,3 +50,7 @@ The API is designed to be declarative to improve code maintainability:
 By using Go Generics, Stampede ensures that:
 -   Compilers catch type mismatches.
 -   There is no performance overhead from `interface{}` casting or reflection during runtime retrieval.
+
+## 6. Verified Integration (Testability)
+
+Stampede is built with testability in mind. It includes a comprehensive BDD suite that verifies its behavior not just in isolation, but also when integrated with a real `net/http` server. This ensures that the protection against Thundering Herds works correctly across the boundary of an actual web application handler.

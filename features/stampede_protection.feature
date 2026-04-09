@@ -11,5 +11,5 @@ Feature: Stampede Protection (Singleflight)
     Given the cache does NOT contain "users:id:99"
     And the database contains "users:id:99"
     When 50 concurrent requests ask for entity "users" with ID 99
-    Then all 50 requests should receive '{"ID":99, ...}'
+    Then all 50 requests should receive '{"ID":99, "Name":"StampedeUser"}'
     And the database fetcher should only have been called EXACTLY 1 time
