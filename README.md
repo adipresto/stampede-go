@@ -5,10 +5,13 @@
 ## Key Features
 
 -   🚀 **Type-Safe Generics**: Built using Go Generics (1.18+), ensuring No-Magic and no `interface{}` casting.
--   🛡️ **Stampede Protection**: Built-in `singleflight` integration to collapse concurrent database hits for the same key into a single request.
--   🛠️ **ID Projection (Auto-Repair)**: Advanced `MGet` logic that identifies missing entities, fetches them in a single batch from the database, and automatically repairs the cache.
+-   🛡️ **Stampede Protection (Level 1 & 2)**: 
+    - **L1**: Singleflight integration for single key lookups.
+    - **L2 (DataLoader)**: Global Batcher that merges independent `MGet` requests from different users into a single unified database query.
+-   🛠️ **ID Projection (Auto-Repair)**: Advanced `MGet` logic that identifies missing entities, fetches them in a single batch, and automatically repairs the cache.
+-   🎯 **Sparse Fieldsets**: Retrieve only specific fields from a cached entity (Field Projection) to reduce bandwidth and support mobile-optimized responses.
 -   🧩 **Declarative DX**: Register your entities with a "Batch Fetcher" once, and use them anywhere.
--   💾 **Memory Efficient**: Focuses on **Entity-Level Caching** to avoid data redundancy in RAM.
+-   💾 **Memory Efficient**: Focuses on **Entity-Level Caching** (1 Key = 1 Row) to eliminate data redundancy in RAM.
 
 ## Installation
 
@@ -28,14 +31,18 @@ func main() {
     rdb := redis.NewClient(&redis.Options{Addr: "localhost:6379"})
     reg := stampede.NewRegistry(rdb)
 
-    // 1. Declaratively register your entity
+    // 1. Declaratively register your entity with Global Batching (Level 2)
     UserCache := stampede.Register[int, User](reg, "users", func(ctx context.Context, ids []int) (map[int]User, error) {
-        return db.Users.FindMany(ids) // Batch fetcher
-    })
+        return db.Users.FindMany(ids) // All concurrent requests will be merged here!
+    }, stampede.WithBatching(5 * time.Millisecond, 100))
 
-    // 2. Use it
-    user, _ := UserCache.Get(ctx, 1)        // Cache-First + Singleflight
-    users, _ := UserCache.MGet(ctx, []int{1, 2, 3}) // Auto-batching repair
+    // 2. Simple Usage
+    user, _ := UserCache.Get(ctx, 1)        // Cache-First + Singleflight (L1)
+    users, _ := UserCache.MGet(ctx, []int{1, 2, 3}) // Global Batching (L2)
+
+    // 3. Sparse Fieldsets (Field Projection)
+    // Only fetch "Name" and "Email" from the cached "User" entity.
+    partial, _ := UserCache.GetFields(ctx, 1, []string{"Name", "Email"}) 
 }
 ```
 

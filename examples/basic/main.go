@@ -50,4 +50,10 @@ func main() {
 	for _, m := range members {
 		fmt.Printf("Member: %v\n", m)
 	}
+
+	// 6. Usage: Sparse Fieldsets (Field Projection)
+	fmt.Println("\n--- Sparse Fieldsets ---")
+	fields := []string{"Email"} // Only fetch Email
+	mFields, _ := MemberCache.GetFields(ctx, 1, fields)
+	fmt.Printf("Member 1 (Fields: %v): %v\n", fields, mFields)
 }

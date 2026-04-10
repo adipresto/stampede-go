@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sync"
 
+	"time"
 	"github.com/redis/go-redis/v9"
 	"golang.org/x/sync/singleflight"
 )
@@ -13,6 +14,12 @@ import (
 // Fetcher is a function type that retrieves entities from the database.
 // It should return a map of ID to Entity.
 type Fetcher[K comparable, T any] func(ctx context.Context, ids []K) (map[K]T, error)
+
+type batchRequest[K comparable, T any] struct {
+	ids  []K
+	resp chan map[K]T
+	err  chan error
+}
 
 // Registry manages the shared resources for multiple entities.
 type Registry struct {
@@ -33,6 +40,7 @@ type Entity[K comparable, T any] struct {
 	fetch    Fetcher[K, T]
 	config   Config
 	mu       sync.RWMutex
+	batchChan chan batchRequest[K, T]
 }
 
 // Register declaratively defines a new entity cache within a registry.
@@ -42,12 +50,17 @@ func Register[K comparable, T any](r *Registry, prefix string, fetch Fetcher[K, 
 		opt(&cfg)
 	}
 
-	return &Entity[K, T]{
-		registry: r,
-		group:    &singleflight.Group{},
-		fetch:    fetch,
-		config:   cfg,
+	e := &Entity[K, T]{
+		registry:  r,
+		group:     &singleflight.Group{},
+		fetch:     fetch,
+		config:    cfg,
+		batchChan: make(chan batchRequest[K, T], 100),
 	}
+
+	go e.batchingLoop()
+
+	return e
 }
 
 // cacheKey returns the formatted redis key for a given ID.
@@ -141,11 +154,24 @@ func (e *Entity[K, T]) MGet(ctx context.Context, ids []K) ([]T, error) {
 		}
 	}
 
-	// 2. Auto-Repair: Fetch missing IDs from DB in a single batch
+	// 2. Auto-Repair: Use Global Batcher for missing IDs
 	if len(missingIDs) > 0 {
-		dbResults, err := e.fetch(ctx, missingIDs)
-		if err != nil {
+		resp := make(chan map[K]T, 1)
+		errChan := make(chan error, 1)
+		e.batchChan <- batchRequest[K, T]{
+			ids:  missingIDs,
+			resp: resp,
+			err:  errChan,
+		}
+
+		var dbResults map[K]T
+		select {
+		case res := <-resp:
+			dbResults = res
+		case err := <-errChan:
 			return nil, err
+		case <-ctx.Done():
+			return nil, ctx.Err()
 		}
 
 		pipe := e.registry.redis.Pipeline()
@@ -161,4 +187,106 @@ func (e *Entity[K, T]) MGet(ctx context.Context, ids []K) ([]T, error) {
 	}
 
 	return results, nil
+}
+
+func (e *Entity[K, T]) batchingLoop() {
+	for request := range e.batchChan {
+		// Start a new batch
+		ids := make(map[K]struct{})
+		requests := []batchRequest[K, T]{request}
+
+		for _, id := range request.ids {
+			ids[id] = struct{}{}
+		}
+
+		// Fill window
+		timer := time.NewTimer(e.config.BatchWait)
+		stop := false
+
+		for !stop {
+			select {
+			case req := <-e.batchChan:
+				requests = append(requests, req)
+				for _, id := range req.ids {
+					ids[id] = struct{}{}
+				}
+				if len(ids) >= e.config.MaxBatchSize {
+					stop = true
+				}
+			case <-timer.C:
+				stop = true
+			}
+		}
+
+		// Execute Batch Fetch
+		uniqueIDs := make([]K, 0, len(ids))
+		for id := range ids {
+			uniqueIDs = append(uniqueIDs, id)
+		}
+
+		dbResults, err := e.fetch(context.Background(), uniqueIDs)
+
+		// Distribute results
+		for _, req := range requests {
+			if err != nil {
+				req.err <- err
+				continue
+			}
+
+			// Extract only IDs requested by this specific caller
+			subset := make(map[K]T)
+			for _, id := range req.ids {
+				if val, ok := dbResults[id]; ok {
+					subset[id] = val
+				}
+			}
+			req.resp <- subset
+		}
+	}
+}
+
+// GetFields retrieves a single entity and returns only selected fields.
+// Projection happens in memory after fetching the full entity from cache/DB.
+func (e *Entity[K, T]) GetFields(ctx context.Context, id K, fields []string) (map[string]any, error) {
+	val, err := e.Get(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return e.projectFields(val, fields), nil
+}
+
+// MGetFields retrieves multiple entities and returns only selected fields for each.
+func (e *Entity[K, T]) MGetFields(ctx context.Context, ids []K, fields []string) ([]map[string]any, error) {
+	vals, err := e.MGet(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+
+	results := make([]map[string]any, len(vals))
+	for i, v := range vals {
+		results[i] = e.projectFields(v, fields)
+	}
+	return results, nil
+}
+
+// projectFields is a helper that converts an entity to a map and filters keys.
+func (e *Entity[K, T]) projectFields(val T, fields []string) map[string]any {
+	// 1. Convert struct/type to map using JSON (respects JSON tags)
+	payload, _ := json.Marshal(val)
+	var fullMap map[string]any
+	json.Unmarshal(payload, &fullMap)
+
+	// 2. If no fields specified, return everything
+	if len(fields) == 0 {
+		return fullMap
+	}
+
+	// 3. Filter only requested fields
+	filtered := make(map[string]any)
+	for _, f := range fields {
+		if v, ok := fullMap[f]; ok {
+			filtered[f] = v
+		}
+	}
+	return filtered
 }
